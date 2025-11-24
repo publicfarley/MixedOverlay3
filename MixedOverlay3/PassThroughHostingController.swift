@@ -44,11 +44,9 @@ class PassThroughHostingController<Content: View>: UIHostingController<Content> 
 /// A custom UIView that overrides hit-testing to allow touches to pass through
 /// transparent areas while still capturing touches on opaque SwiftUI content.
 ///
-/// Handles both iOS 16-25 (subview-based detection) and iOS 26+ (layer-based detection).
-/// iOS 26 made the SwiftUI view hierarchy opaque to UIKit, requiring layer hit-testing instead.
-///
-/// When a transparent area is detected, delegates hit-testing to the specified UIView
-/// (typically the underlying UIKit view) to maintain the responder chain integrity.
+/// Uses pixel-based alpha detection to determine if touches land on visible SwiftUI content
+/// or transparent pass-through areas. When a transparent area is detected, delegates
+/// hit-testing to the specified UIView (typically the underlying UIKit layer).
 private class PassThroughView: UIView {
     private var encounteredEvents = Set<UIEvent>()
     private var cachedHitResults = [ObjectIdentifier: UIView]()
@@ -84,106 +82,41 @@ private class PassThroughView: UIView {
             return cachedResult
         }
 
-        // iOS 26+: SwiftUI hosting view captures all touches, we need layer-based pixel detection
-        // to determine if the touch is on transparent vs opaque SwiftUI content
-        if #available(iOS 26, *) {
-            if isHostingRootView(hitView) {
-                // Check if point is on opaque SwiftUI content using layer rendering
-                if isPointOnOpaqueContent(point, in: hitView) {
-                    // Touch is on actual SwiftUI content (toolbar, FAB, etc.) - let SwiftUI handle it
-                    encounteredEvents.insert(event)
-                    cachedHitResults[eventId] = hitView
-                    return hitView
-                }
-
-                // Touch is on transparent area - delegate to Layer B
-                encounteredEvents.insert(event)
-                if let delegateView = delegateHitTestTo {
-                    let delegatePoint = delegateView.convert(point, from: self)
-                    let delegateResult = delegateView.hitTest(delegatePoint, with: event)
-                    if let result = delegateResult {
-                        cachedHitResults[eventId] = result
-                    }
-                    return delegateResult
-                }
-                return nil
-            }
-        }
-
-        // If the hit view is this container itself (transparent area), delegate or pass through
-        if hitView == self {
-            if let delegateView = delegateHitTestTo {
-                let delegatePoint = delegateView.convert(point, from: self)
-                let delegateResult = delegateView.hitTest(delegatePoint, with: event)
-                encounteredEvents.insert(event)
-                if let result = delegateResult {
-                    cachedHitResults[eventId] = result
-                }
-                return delegateResult
-            }
-            return nil
-        }
-
-        // Pre-iOS 26: Check if hit view is the hosting view root using class name
-        if !ProcessInfo.processInfo.isOperatingSystemAtLeast(
-            OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0)
-        ) {
-            if isHostingRootView(hitView) {
-                if let delegateView = delegateHitTestTo {
-                    let delegatePoint = delegateView.convert(point, from: self)
-                    let delegateResult = delegateView.hitTest(delegatePoint, with: event)
-                    encounteredEvents.insert(event)
-                    if let result = delegateResult {
-                        cachedHitResults[eventId] = result
-                    }
-                    return delegateResult
-                }
-                return nil
-            }
-        }
-
-        // iOS 18+: Mark event as processed and cache result for double hit-test handling
-        if #available(iOS 18, *) {
+        // Use pixel-based alpha detection for all cases (self, hosting view, or any other view)
+        if isPointOnOpaqueContent(point, in: hitView) {
+            // Touch is on visible content - let the hit view handle it
             encounteredEvents.insert(event)
             cachedHitResults[eventId] = hitView
+            return hitView
         }
 
-        // Touch landed on actual SwiftUI content - handle normally
-        return hitView
+        // Touch is on transparent area - delegate to underlying layer
+        encounteredEvents.insert(event)
+        if let delegateView = delegateHitTestTo {
+            let delegatePoint = delegateView.convert(point, from: self)
+            let delegateResult = delegateView.hitTest(delegatePoint, with: event)
+            if let result = delegateResult {
+                cachedHitResults[eventId] = result
+            }
+            return delegateResult
+        }
+        return nil
     }
 
-    /// Checks if the given view is the UIHostingController's root view.
-    /// The hosting view's class name contains "_UIHostingView".
-    /// This works for both iOS 16+ and iOS 26+ to detect transparent hosting areas.
-    private func isHostingRootView(_ view: UIView) -> Bool {
-        let className = String(describing: type(of: view))
-        return className.contains("_UIHostingView")
-    }
-
-    /// Determines if a point is on opaque (visible) SwiftUI content by sampling the pixel alpha.
-    /// This is necessary for iOS 26+ where SwiftUI's view hierarchy is opaque to UIKit hit-testing.
+    /// Determines if a point is on opaque (visible) content by sampling the pixel alpha.
     /// - Parameters:
     ///   - point: The point in this view's coordinate system
-    ///   - hostingView: The hosting view to render and sample
+    ///   - targetView: The view to render and sample
     /// - Returns: true if the point is on content with alpha > threshold, false if transparent
-    private func isPointOnOpaqueContent(_ point: CGPoint, in hostingView: UIView) -> Bool {
-        let pointInHostingView = hostingView.convert(point, from: self)
+    private func isPointOnOpaqueContent(_ point: CGPoint, in targetView: UIView) -> Bool {
+        let pointInTargetView = targetView.convert(point, from: self)
 
         // Ensure point is within bounds
-        guard hostingView.bounds.contains(pointInHostingView) else {
+        guard targetView.bounds.contains(pointInTargetView) else {
             return false
         }
 
-        // Render a small region around the point and check alpha
-        let sampleSize: CGFloat = 1
-        let sampleRect = CGRect(
-            x: pointInHostingView.x - sampleSize / 2,
-            y: pointInHostingView.y - sampleSize / 2,
-            width: sampleSize,
-            height: sampleSize
-        )
-
-        // Create a bitmap context to render into
+        // Create a bitmap context to render a single pixel
         let colorSpace = CGColorSpaceCreateDeviceRGB()
         var pixelData: [UInt8] = [0, 0, 0, 0] // RGBA
 
@@ -200,10 +133,10 @@ private class PassThroughView: UIView {
         }
 
         // Translate context to render the sample point at origin
-        context.translateBy(x: -sampleRect.origin.x, y: -sampleRect.origin.y)
+        context.translateBy(x: -pointInTargetView.x, y: -pointInTargetView.y)
 
-        // Render the hosting view's layer into our context
-        hostingView.layer.render(in: context)
+        // Render the target view's layer into our context
+        targetView.layer.render(in: context)
 
         // Check alpha channel (index 3 in RGBA)
         let alpha = pixelData[3]
