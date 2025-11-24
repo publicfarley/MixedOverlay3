@@ -9,13 +9,20 @@ import SwiftUI
 
 struct ContentView: View {
     var body: some View {
-        VStack {
-            Image(systemName: "globe")
-                .imageScale(.large)
-                .foregroundStyle(.tint)
-            Text("Hello, world!")
-        }
-        .padding()
+        MainContainerViewControllerRepresentable()
+            .ignoresSafeArea()
+    }
+}
+
+/// A UIViewControllerRepresentable that bridges the UIKit MainContainerViewController
+/// into the SwiftUI view hierarchy.
+struct MainContainerViewControllerRepresentable: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> MainContainerViewController {
+        MainContainerViewController()
+    }
+
+    func updateUIViewController(_ uiViewController: MainContainerViewController, context: Context) {
+        // No updates needed
     }
 }
 
