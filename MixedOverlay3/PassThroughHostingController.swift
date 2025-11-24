@@ -74,7 +74,7 @@ private class PassThroughView: UIView {
 
         let eventId = ObjectIdentifier(event)
 
-        // Handle iOS 18+ double hit-test behavior: on second call for same event, return cached result
+        // Cache result to avoid redundant layer rendering if hitTest is called multiple times per event
         if encounteredEvents.contains(event) {
             let cachedResult = cachedHitResults[eventId]
             encounteredEvents.removeAll()
