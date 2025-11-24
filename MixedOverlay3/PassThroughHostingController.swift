@@ -84,9 +84,19 @@ private class PassThroughView: UIView {
             return cachedResult
         }
 
-        // iOS 26+: Check if hitView is the hosting root view and delegate to underlying UIKit layer
+        // iOS 26+: SwiftUI hosting view captures all touches, we need layer-based pixel detection
+        // to determine if the touch is on transparent vs opaque SwiftUI content
         if #available(iOS 26, *) {
             if isHostingRootView(hitView) {
+                // Check if point is on opaque SwiftUI content using layer rendering
+                if isPointOnOpaqueContent(point, in: hitView) {
+                    // Touch is on actual SwiftUI content (toolbar, FAB, etc.) - let SwiftUI handle it
+                    encounteredEvents.insert(event)
+                    cachedHitResults[eventId] = hitView
+                    return hitView
+                }
+
+                // Touch is on transparent area - delegate to Layer B
                 encounteredEvents.insert(event)
                 if let delegateView = delegateHitTestTo {
                     let delegatePoint = delegateView.convert(point, from: self)
@@ -148,5 +158,57 @@ private class PassThroughView: UIView {
     private func isHostingRootView(_ view: UIView) -> Bool {
         let className = String(describing: type(of: view))
         return className.contains("_UIHostingView")
+    }
+
+    /// Determines if a point is on opaque (visible) SwiftUI content by sampling the pixel alpha.
+    /// This is necessary for iOS 26+ where SwiftUI's view hierarchy is opaque to UIKit hit-testing.
+    /// - Parameters:
+    ///   - point: The point in this view's coordinate system
+    ///   - hostingView: The hosting view to render and sample
+    /// - Returns: true if the point is on content with alpha > threshold, false if transparent
+    private func isPointOnOpaqueContent(_ point: CGPoint, in hostingView: UIView) -> Bool {
+        let pointInHostingView = hostingView.convert(point, from: self)
+
+        // Ensure point is within bounds
+        guard hostingView.bounds.contains(pointInHostingView) else {
+            return false
+        }
+
+        // Render a small region around the point and check alpha
+        let sampleSize: CGFloat = 1
+        let sampleRect = CGRect(
+            x: pointInHostingView.x - sampleSize / 2,
+            y: pointInHostingView.y - sampleSize / 2,
+            width: sampleSize,
+            height: sampleSize
+        )
+
+        // Create a bitmap context to render into
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        var pixelData: [UInt8] = [0, 0, 0, 0] // RGBA
+
+        guard let context = CGContext(
+            data: &pixelData,
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return false
+        }
+
+        // Translate context to render the sample point at origin
+        context.translateBy(x: -sampleRect.origin.x, y: -sampleRect.origin.y)
+
+        // Render the hosting view's layer into our context
+        hostingView.layer.render(in: context)
+
+        // Check alpha channel (index 3 in RGBA)
+        let alpha = pixelData[3]
+        let alphaThreshold: UInt8 = 10 // Small threshold to account for anti-aliasing
+
+        return alpha > alphaThreshold
     }
 }
